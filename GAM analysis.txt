@@ -1,0 +1,76 @@
+
+##An example of GAM model fitting
+# Load the required R packages
+library(gratia); library(mgcv); library(tidyverse); library(splines); library(nlme)
+
+# Set the random seed to ensure reproducibility of results
+set.seed(123)
+
+# Read the data file，
+#For example, the independent variable is "Year" and the dependent variable is "Gross Primary Productivity (GPP)". 
+Data <- read.csv("D:/Dia.csv")
+
+# Fit the data using a GAM model
+result <- gam(GPP ~ s(Year, k = 5), data = Data, 
+              correlation = corCAR1(form = ~ Year), method = "REML")
+
+# Check the model fit
+gam.check(result)
+
+# View the model summary information
+summary(result)
+
+# Extract the model residuals and plot the autocorrelation function
+acf(resid(result))
+
+# Generate new Year data for prediction and derivative calculation
+newYear <- data.frame(Year = seq(min(Data$Year), max(Data$Year), length.out = 20))
+
+# Make predictions on the new data and calculate the standard error
+fit_gcv <- predict(result, newdata = newYear, se.fit = TRUE)
+
+# Calculate the critical value of the t - distribution
+crit.t <- qt(0.975, df.residual(result))
+
+# Create a data frame containing predicted values and confidence intervals
+newGCV <- data.frame(
+        Year = newYear$Year,
+        fit = fit_gcv$fit,
+        se.fit = fit_gcv$se.fit,
+        upper = fit_gcv$fit + crit.t * fit_gcv$se.fit,
+        lower = fit_gcv$fit - crit.t * fit_gcv$se.fit
+)
+
+# Calculate the first - order derivative and simultaneous confidence intervals
+GPP.d <- fderiv(result, newdata = newYear, n = 20)
+GPP.sint <- cbind(confint(GPP.d, nsim = 20, type = "simultaneous"), Year = newYear$Year)
+
+# Convert the result to a tibble
+GPP.sint <- as_tibble(GPP.sint)
+
+# Check and handle data types and missing values
+GPP.sint$upper <- as.numeric(GPP.sint$upper)
+GPP.sint$lower <- as.numeric(GPP.sint$lower)
+GPP.sint <- GPP.sint %>% mutate(class = case_when(
+        upper < 0 ~ "Decrease", 
+        lower > 0 ~ "Increase",
+        TRUE ~ NA_character_ # Handle other cases to ensure consistent class column type
+))
+
+# Filter data for increasing and decreasing phases
+GPP.sint.D <- GPP.sint %>% filter(upper < 0)
+GPP.sint.I <- GPP.sint %>% filter(lower > 0)
+
+# Make predictions for the increasing and decreasing phase data
+pre_gam_D <- predict(result, newdata = data.frame(Year = GPP.sint.D$Year), se.fit = TRUE)
+pre_gam_D_test <- data.frame(Year = GPP.sint.D$Year, fit = pre_gam_D$fit)
+pre_gam_I <- predict(result, newdata = data.frame(Year = GPP.sint.I$Year), se.fit = TRUE)
+pre_gam_I_test <- data.frame(Year = GPP.sint.I$Year, fit = pre_gam_I$fit)
+
+# View the model summary information again
+summary(result)
+gam.check(result)
+
+# Output the GAM fitting results and first - order derivative results
+print(newGCV)
+print(GPP.sint)

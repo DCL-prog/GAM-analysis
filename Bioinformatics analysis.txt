@@ -1,0 +1,204 @@
+# Set the working directory
+setwd("D:/Flatting_Files/18s_silva")
+
+# Install necessary packages if not already installed
+install.packages(c("tidyverse", "phyloseq", "ggplot2", "vegan", "igraph", "ggraph", "patchwork", "RColorBrewer", "openxlsx", "randomcoloR","pheatmap","gtools"))
+
+# Load the packages
+library(tidyverse)
+library(phyloseq)
+library(ggplot2)
+library(vegan)
+library(igraph)
+library(ggraph)
+library(patchwork)
+library(RColorBrewer)
+library(openxlsx)
+library(randomcoloR)
+library(pheatmap)
+library(gtools)
+
+# Read the content of the CSV file
+otu_table <- read.csv("otu_Flattening.csv", stringsAsFactors = FALSE)
+
+# Filter rows in the OTU table that contain specific taxonomic information
+filtered_otu_table <- otu_table %>% 
+  filter(str_detect(taxonomy, "p__Chlorophyta")|str_detect(taxonomy, "p__Diatomea")|
+           str_detect(taxonomy, "p__Ochrophyta")|str_detect(taxonomy, "p__Cryptophyceae"))
+
+# Save the filtered OTU table
+write.csv(filtered_otu_table, "filtered_otu.csv", row.names = FALSE)
+
+# Read the filtered OTU table
+filtered_otu_table <- read.csv("filtered_otu.csv", stringsAsFactors = FALSE)
+
+# Separate the taxonomic information
+taxonomy <- separate(filtered_otu_table, taxonomy, into = c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species"), 
+                     sep = "; ", fill = "right", remove = FALSE)
+
+# Extract the OTU abundance matrix
+otu_matrix <- filtered_otu_table[, 2:(ncol(filtered_otu_table)-1)]
+otu_matrix <- as.data.frame(lapply(otu_matrix, function(x) as.numeric(gsub("[^0-9.-]", "", x))))
+rownames(otu_matrix) <- filtered_otu_table[[1]]
+
+# Log-transform the OTU abundance matrix (add 1 to avoid log(0))
+otu_matrix <- log(otu_matrix + 1) 
+
+# Check for NA values in the transformed data frame and replace them with zeros
+if (any(is.na(otu_matrix))) {
+  warning("There are NAs in the data. Replacing NAs with zeros.")
+  otu_matrix[is.na(otu_matrix)] <- 0
+}
+
+# Ensure the OTU names in taxonomic information and OTU table are consistent
+rownames(taxonomy) <- filtered_otu_table[[1]]
+taxonomy <- taxonomy[,-1]  # Remove the OTUID column as it's already used as row names
+
+# Ensure the row names in the OTU table and taxonomic information table are consistent
+otu_matrix <- otu_matrix[rownames(taxonomy), ]
+
+# Create a phyloseq object
+OTU <- otu_table(as.matrix(otu_matrix), taxa_are_rows = TRUE)
+TAX <- tax_table(as.matrix(taxonomy))
+physeq <- phyloseq(OTU, TAX)
+
+# Add metadata to the samples
+sample_data_df <- data.frame(Sample = colnames(otu_matrix))
+rownames(sample_data_df) <- sample_data_df$Sample
+sample_data(physeq) <- sample_data(sample_data_df)
+
+# Define a function to calculate percentages and display all species
+calculate_percentage <- function(data, level) {
+  data %>%
+    group_by_at(level) %>%
+    summarise(across(where(is.numeric), ~ sum(.x, na.rm = TRUE))) %>%
+    pivot_longer(-all_of(level), names_to = "Sample", values_to = "Abundance") %>%
+    group_by(Sample) %>%
+    mutate(Percentage = Abundance / sum(Abundance) * 100) %>%
+    ungroup()
+}
+
+# Calculate and plot percentage graphs for each taxonomic level
+levels <- c("Phylum", "Class", "Order", "Family", "Genus", "Species")
+plots <- list()
+data_frames <- list()
+
+for (level in levels) {
+  percentage <- calculate_percentage(taxonomy, level)
+  percentage$Sample <- factor(percentage$Sample, levels = unique(percentage$Sample))
+
+  # Sort the legend by abundance
+  sorted_levels <- percentage %>%
+    group_by_at(level) %>%
+    summarise(Total_Abundance = sum(Abundance)) %>%
+    arrange(desc(Total_Abundance)) %>%
+    pull(!!sym(level))
+
+  percentage[[level]] <- factor(percentage[[level]], levels = sorted_levels)
+
+  # Use random colors
+  unique_levels <- length(unique(percentage[[level]]))
+  colors <- distinctColorPalette(unique_levels)
+
+  plot <- ggplot(percentage, aes(x = Sample, y = Percentage, fill = !!sym(level))) +
+    geom_bar(stat = "identity", position = "stack") +
+    scale_fill_manual(values = colors) +
+    theme_minimal() +
+    labs(title = paste(level, "Level Percentage"), x = "Sample", y = "Percentage") +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    guides(fill = guide_legend(reverse = TRUE))
+
+  plots[[level]] <- plot
+  data_frames[[level]] <- percentage
+
+  ggsave(paste0("18s-silva/", level, "_percentage.jpg"), plot, width = 12, height = 8, units = "in")
+}
+
+# Create the directory if it doesn't exist
+if (!dir.exists("D:/Flatting_Files/18s_silva/18s-silva")) {
+  dir.create("D:/Flatting_Files/18s_silva/18s-silva")
+}
+
+# Save the data to CSV files
+for (level in levels) {
+  write.csv(data_frames[[level]], paste0("D:/Flatting_Files/18s_silva/18s-silva/", level, "_percentage.csv"), row.names = FALSE)
+}
+
+# Calculate Shannon and Chao1 indices
+richness <- estimate_richness(physeq, measures = c("Shannon", "Chao1"))
+richness$SampleID <- rownames(richness)
+
+# Ensure samples are sorted in natural number order
+sample_order <- mixedsort(unique(richness$SampleID))
+richness$SampleID <- factor(richness$SampleID, levels = sample_order)
+
+# Calculate OTU richness
+otu_richness <- data.frame(SampleID = sample_names(physeq),
+                           OTU_Richness = apply(otu_table(physeq), 2, function(x) sum(x > 0)))
+otu_richness$SampleID <- factor(otu_richness$SampleID, levels = sample_order)
+
+# Save the diversity index data to CSV files
+write.csv(richness, "D:/Flatting_Files/18s_silva/18s-silva/diversity_indices.csv", row.names = FALSE)
+write.csv(otu_richness, "D:/Flatting_Files/18s_silva/18s-silva/otu_richness.csv", row.names = FALSE)
+
+# NMDS analysis
+nmds <- ordinate(physeq, method = "NMDS", distance = "bray")
+nmds_scores <- as.data.frame(vegan::scores(nmds, display = "sites"))
+nmds_scores$SampleID <- rownames(nmds_scores)
+nmds_plot <- ggplot(nmds_scores, aes(x = NMDS1, y = NMDS2, color = SampleID)) +
+  geom_point(size = 3) + theme_minimal() + labs(title = "NMDS") +
+  theme(legend.position = "right")
+
+# Save NMDS data and plot
+write.csv(nmds_scores, "D:/Flatting_Files/18s_silva/18s-silva/nmds_scores.csv", row.names = FALSE)
+ggsave("D:/Flatting_Files/18s_silva/18s-silva/nmds_plot.jpg", nmds_plot, width = 12, height = 8, units = "in")
+
+# PCoA analysis
+pcoa <- ordinate(physeq, method = "PCoA", distance = "bray")
+pcoa_coords <- pcoa$vectors[, 1:2]  # Extract the first two principal coordinates
+colnames(pcoa_coords) <- c("PCoA1", "PCoA2")
+pcoa_scores <- as.data.frame(pcoa_coords)
+pcoa_scores$SampleID <- rownames(pcoa_scores)
+pcoa_plot <- ggplot(pcoa_scores, aes(x = PCoA1, y = PCoA2, color = SampleID)) +
+  geom_point(size = 3) + theme_minimal() + labs(title = "PCoA") +
+  theme(legend.position = "right")
+
+# Save PCoA data and plot
+write.csv(pcoa_scores, "D:/Flatting_Files/18s_silva/18s-silva/pcoa_scores.csv", row.names = FALSE)
+ggsave("D:/Flatting_Files/18s_silva/18s-silva/pcoa_plot.jpg", pcoa_plot, width = 12, height = 8, units = "in")
+
+# Plot the Shannon index with confidence intervals
+plot_shannon <- ggplot(richness, aes(x = SampleID, y = Shannon)) +
+  geom_point(color = "blue") +
+  geom_line(aes(group = 1), color = "blue") +
+  geom_smooth(method = "lm", se = TRUE, color = "blue", linetype = "dashed") +
+  theme_minimal() +
+  labs(title = "Shannon Diversity Index", x = "Sample", y = "Shannon Index") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Save the Shannon index plot
+ggsave("D:/Flatting_Files/18s_silva/18s-silva/shannon_plot.jpg", plot_shannon, width = 12, height = 8, units = "in")
+
+# Plot the Chao1 index with confidence intervals
+plot_chao1 <- ggplot(richness, aes(x = SampleID, y = Chao1)) +
+  geom_point(color = "green") +
+  geom_line(aes(group = 1), color = "green") +
+  geom_smooth(method = "lm", se = TRUE, color = "green", linetype = "dashed") +
+  theme_minimal() +
+  labs(title = "Chao1 Index", x = "Sample", y = "Chao1 Index") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Save the Chao1 index plot
+ggsave("D:/Flatting_Files/18s_silva/18s-silva/chao1_plot.jpg", plot_chao1, width = 12, height = 8, units = "in")
+
+# Plot the OTU richness with confidence intervals
+plot_otu_richness <- ggplot(otu_richness, aes(x = SampleID, y = OTU_Richness)) +
+  geom_point(color = "purple") +
+  geom_line(aes(group = 1), color = "purple") +
+  geom_smooth(method = "lm", se = TRUE, color = "purple", linetype = "dashed") +
+  theme_minimal() +
+  labs(title = "OTU Richness", x = "Sample", y = "OTU Richness") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Save the OTU richness plot
+ggsave("D:/Flatting_Files/18s_silva/18s-silva/otu_richness_plot.jpg", plot_otu_richness, width = 12, height = 8, units = "in")
