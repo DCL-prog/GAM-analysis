@@ -1,0 +1,68 @@
+##An example of HGAM model fitting
+# Load necessary libraries
+library(mgcv)
+library(gratia)
+library(dplyr)
+library(tidyr)
+setwd("D:/Glacierlakes")
+
+# Read the data
+#For example, the independent variable is "Year" and the dependent variable is "Gross Primary Productivity (GPP)". The "Type" serves as the grouping variable.
+my_data <- read.csv("GS_glacier.csv")
+# Ensure the grouping column is of factor type
+my_data$Type <- factor(my_data$Type)
+
+# Build the HGAM model
+mod <- gam(
+  GPP ~ s(Year, k = 10, m = 2) + s(Year, Type, bs = "re", k = 10, m = 2),  # Global smoothing and grouped hierarchical smoothing
+  data = my_data,
+  method = "REML"
+)
+
+# Output the model summary information
+model_summary <- summary(mod)
+cat("Model Summary:\n"); print(model_summary)
+
+# Check the model fitting situation
+gam.check(mod)
+
+# Extract the model residuals and plot the autocorrelation function
+residuals_gam <- resid(mod) 
+acf(residuals_gam)
+
+# Construct a new data frame for prediction
+new_data <- expand.grid(
+  Year = seq(min(my_data$Year), max(my_data$Year), length.out = 200),  # Adjust the resolution
+  Type = levels(my_data$Type)  # Retain the grouping information
+)
+
+# Calculate the critical value of the t-distribution
+crit_t <- qt(0.975, df.residual(mod))
+
+### Global smoothing related calculations
+# Predict the global smoothing values and confidence intervals
+pred_global <- predict(mod, newdata = new_data, se.fit = TRUE, exclude = "s(Year,Type)")
+new_data_global <- new_data %>% filter(Type == levels(Type)[1])  # Global smoothing
+new_data_global <- cbind(new_data_global, fit = pred_global$fit, se.fit = pred_global$se.fit)
+new_data_global <- new_data_global %>%
+  mutate(upper = fit + crit_t * se.fit,
+         lower = fit - crit_t * se.fit)
+
+# Calculate the first derivative of the global smoothing
+deriv_global <- fderiv(mod, newdata = new_data_global, exclude = "s(Year,Type)")
+deriv_global_df <- data.frame(
+  Year = new_data_global$Year,
+  est = deriv_global$derivatives[[1]]$deriv,
+  lower = deriv_global$derivatives[[1]]$deriv - crit_t * deriv_global$derivatives[[1]]$se.deriv,
+  upper = deriv_global$derivatives[[1]]$deriv + crit_t * deriv_global$derivatives[[1]]$se.deriv
+) %>%
+  mutate(class = case_when(
+    upper < 0 ~ "Decrease",
+    lower > 0 ~ "Increase",
+    TRUE ~ "No Change"
+  ))
+
+# Print the generated global smoothing related data
+cat("Model Summary:\n"); print(model_summary)
+cat("Global Fitting Data:\n"); print(new_data_global)
+cat("Global First Derivatives Data:\n"); print(deriv_global_df)
